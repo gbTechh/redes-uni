@@ -1,25 +1,25 @@
 #include <arpa/inet.h>
+#include <iostream>
 #include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <string>
 #include <sys/socket.h>
 #include <sys/types.h>
-#include <unistd.h>
-#include <string>
-#include <iostream>
 #include <thread>
+#include <unistd.h>
 
 using namespace std;
 
-void readThread(int socketConn){
+void readThread(int socketConn) {
   int n;
   char buffer[256];
   do {
     n = read(socketConn, buffer, 255);
-    buffer[n] = '\n';
-    cout<<"\n" << buffer <<endl;
-  } while(strncmp(buffer, "chau",4) != 0);
+    buffer[n] = '\0';
+    cout << "\n" << buffer << endl;
+  } while (strncmp(buffer, "chau", 4) != 0);
 }
 
 int main(void) {
@@ -27,7 +27,6 @@ int main(void) {
   int Res;
   int SocketCli = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
   int n;
-  char buffer[256];
   string buf;
 
   if (-1 == SocketCli) {
@@ -48,18 +47,17 @@ int main(void) {
     exit(EXIT_FAILURE);
   }
 
-  std::thread(readThread, SocketCli).detach();
-
+  thread serverReadThread(readThread, SocketCli);
   do {
     cout << "Enter message for the server: ";
-    cin >> buf;
+    getline(cin, buf);
     n = write(SocketCli, buf.c_str(), buf.size());
- 
+
   } while (buf.compare("chau") != 0);
-  
+
   shutdown(SocketCli, SHUT_RDWR);
+  close(SocketCli); // Corrección: añadir close()
 
-
-  close(SocketCli);
+  serverReadThread.join();
   return 0;
 }
