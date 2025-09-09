@@ -25,26 +25,25 @@ string padNumber(int num, int width) {
     s = string(width - s.size(), '0') + s;
   return s;
 }
+
 void readThread(int socketConn) {
-  char buffer[256];
-  int n;
+  char opcode;
+  ssize_t n;
   char type;
   do {
-    n = read(socketConn, buffer, 255);
-    if (n <= 0) {
-      break; // error o cliente desconectado
-    }
-    buffer[n] = '\0';
-    std::string data(buffer);
-    type = data[0];
-    switch (type) {
+    n = read(socketConn, &opcode, 1);
+
+    if (n <= 0) { break; }
+   
+    switch (opcode) {
     case 'n': {
-      int len = std::stoi(data.substr(1, 2)); // lee "03"
-      std::string nickname = data.substr(3, len);
+      string lenStr = readNString(socketConn, 2);
+      int len = stoi(lenStr);
+      string nickname = readNString(socketConn, len);
       std::cout << "Nickname recibido: " << nickname << "\n";
       lock_guard<mutex> lock(clientsMutex);
       m_clients[nickname] = socketConn;
-      cout << "Nuevo cliente registrado con nickname: " << nickname << endl;
+      cout << "Nuevo cliente registrado con nickname["<<type<<len<<nickname<<"]: " << nickname << endl;
       break;
     }
     case 'e': {
@@ -54,7 +53,7 @@ void readThread(int socketConn) {
     case 'm': {
       int msgLen = std::stoi(data.substr(1, 3));
       std::string msg = data.substr(4, msgLen);
-
+      
       std::string senderNick;
       {
         lock_guard<mutex> lock(clientsMutex);
@@ -86,6 +85,8 @@ void readThread(int socketConn) {
           write(destSock, proto.c_str(), proto.size());
         }
       }
+
+      std::cout << "Broadcast protocolo [" << proto << "]: "  << "\n";
       break;
     }
     case 't': {
@@ -109,8 +110,7 @@ void readThread(int socketConn) {
         }
       }
 
-      std::cout << "Mensaje privado de [" << senderNick << "] a [" << destNick
-                << "]: " << msg << "\n";
+      std::cout << "Mensaje privado de [" << senderNick << "] a [" << destNick << "]: " << msg << "\n";
 
       // 4) Buscar el destino
       lock_guard<mutex> lock(clientsMutex);
@@ -126,11 +126,11 @@ void readThread(int socketConn) {
 
         std::string proto = "T" + std::string(lenBuf) + senderNick +
                             std::string(msgLenBuf) + msg;
-
+        std::cout << "Mensaje protocolo [" << proto << "]: " << "\n";
         write(destSock, proto.c_str(), proto.size());
       } else {
         // Usuario no existe
-        std::string err = "e03USR";
+        std::string err = "e03ERR";
         write(socketConn, err.c_str(), err.size());
       }
     }
@@ -144,14 +144,23 @@ void readThread(int socketConn) {
         const string &nick = p.first;
         proto += padNumber((int)nick.size(), 2) + nick;
       }
-
+      std::cout << "Listado protocolo [" << proto << "]: " << "\n";
       // Enviar al cliente que pidió la lista
       write(socketConn, proto.c_str(), proto.size());
       break;
       break;
     }
     case 'x': {
-      cout << "Cliente quiere salir." << endl;
+      string nick;
+      for(auto it = m_clients.begin(); it != m_clients.end(); ++it){
+        if(it->second == socketConn){
+          nick = it->first;
+          m_clients.erase(it);
+          break;
+        }
+      }
+      close(socketConn);
+      cout << "Cliente "<<nick<<" desconectado." << endl;
       break;
     }
     default:

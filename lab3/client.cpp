@@ -25,7 +25,7 @@ void readThreadFn(int socketConn) {
     char buffer[1024];
     int n = read(socketConn, buffer, sizeof(buffer) - 1);
     if (n <= 0)
-      break; // servidor cerró o error
+      break;
     buffer[n] = '\0';
 
     // 📌 Parsear según opcode
@@ -42,6 +42,7 @@ void readThreadFn(int socketConn) {
       string msg(buffer + 6 + lenNick, lenMsg);
 
       cout << "\n[Privado de " << sender << "] " << msg << endl;
+      
     } else if (opcode == 'M') {
       // Mensaje broadcast
       string lenNickStr(buffer + 1, 2);
@@ -105,7 +106,7 @@ int main() {
     return 1;
   }
 
-  // 1) Pedir nickname e enviarlo con protocolo nXXnick (XX = 2 dígitos)
+ 
   string nickname;
   cout << "Escriba su nickname: ";
   getline(cin, nickname);
@@ -119,11 +120,10 @@ int main() {
     close(SocketCli);
     return 1;
   }
-
-  // 2) Hilo para recibir mensajes del servidor
+  cout<<"["<<reg<<"]\n";
+  
   thread reader(readThreadFn, SocketCli);
 
-  // 3) Menu simple que arma los protocolos y los envia al servidor
   int opt = 0;
   do {
     cout << "\n--- MENU PRINCIPAL ---\n";
@@ -148,21 +148,24 @@ int main() {
       getline(cin, msg);
       string payload = "t" + padNumber((int)dest.size(), 2) + dest +
                        padNumber((int)msg.size(), 3) + msg;
-
+      cout<<"["<<payload<<"]\n";
       write(SocketCli, payload.c_str(), payload.size());
     } else if (opt == 2) {
       string msg;
       cout << "Escriba el mensaje para todos: ";
       getline(cin, msg);
       string payload = "m" + padNumber((int)msg.size(), 3) + msg;
+      cout<<"["<<payload<<"]\n";
       write(SocketCli, payload.c_str(), payload.size());
     } else if (opt == 3) {
       string payload = "l";
       write(SocketCli, payload.c_str(), payload.size());
+      cout<<"["<<payload<<"]\n";
     } else if (opt == 4) {
       // mandar 'x' para indicar salida al servidor
       string payload = "x";
       write(SocketCli, payload.c_str(), payload.size());
+      cout<<"["<<payload<<"]\n";
       break;
     } else {
       cout << "Opcion no valida\n";
