@@ -1,4 +1,4 @@
-/* Server code in C */
+/* Server code in C con historial en texto */
 
 #include <arpa/inet.h>
 #include <iostream>
@@ -13,6 +13,8 @@
 #include <sys/types.h>
 #include <thread>
 #include <unistd.h>
+#include <fstream>
+#include <ctime>
 
 using namespace std;
 
@@ -24,6 +26,42 @@ string padNumber(int num, int width) {
   if ((int)s.size() < width)
     s = string(width - s.size(), '0') + s;
   return s;
+}
+
+// Función para guardar mensajes en archivo de TEXTO
+void guardarMensajeTexto(const string& tipo, const string& remitente, 
+                        const string& destinatario, const string& mensaje) {
+    ofstream archivo("historial_chat.txt", ios::app); // Modo texto (sin binary)
+    
+    if (archivo) {
+        time_t ahora = time(nullptr);
+        char buffer[80];
+        strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", localtime(&ahora));
+        
+        if (tipo == "M") {
+            archivo << "[BROADCAST][" << buffer << "][" << remitente << "] " << mensaje << "\n";
+        } else {
+            archivo << "[PRIVADO][" << buffer << "][" << remitente << "->" << destinatario << "] " << mensaje << "\n";
+        }
+    }
+}
+
+// Función para leer el historial desde el servidor (TEXTO)
+void leerHistorialServidor() {
+    ifstream archivo("historial_chat.txt");
+    
+    if (!archivo) {
+        cout << "No hay historial disponible" << endl;
+        return;
+    }
+    
+    cout << "\n=== HISTORIAL DEL CHAT (SERVER) ===" << endl;
+    
+    string linea;
+    while (getline(archivo, linea)) {
+        cout << linea << endl;
+    }
+    cout << "=== FIN DEL HISTORIAL ===" << endl;
 }
 
 void readThread(int socketConn) {
@@ -62,12 +100,9 @@ void readThread(int socketConn) {
         write(socketConn, err.c_str(), err.size());
         cout << "Cliente intentó usar nickname repetido: " << nickname << endl;
       } else {
-        // Registrar nuevo cliente
         m_clients[nickname] = socketConn;
-        cout << "Nuevo cliente registrado con nickname[" << type << lenStr
-             << nickname << "]: " << nickname << endl;
+        cout << "Nuevo cliente registrado: " << nickname << endl;
       }
-
       break;
     }
     case 'm': {
@@ -99,12 +134,14 @@ void readThread(int socketConn) {
         }
       }
 
-      cout << "Broadcast de [" << senderNick << "]" << msg << endl;
+      cout << "Broadcast de [" << senderNick << "]: " << msg << endl;
+
+      // GUARDAR EN HISTORIAL (TEXTO)
+      guardarMensajeTexto("M", senderNick, "Todos", msg);
 
       lock_guard<mutex> lock(clientsMutex);
       string proto = "M" + padNumber(senderNick.size(), 2) + senderNick +
                      padNumber(msg.size(), 3) + msg;
-      cout << "[" << proto << "]\n";
       for (auto &p : m_clients) {
         if (p.second != socketConn) {
           write(p.second, proto.c_str(), proto.size());
@@ -147,7 +184,6 @@ void readThread(int socketConn) {
         msg += c;
       }
 
-      // obtener nickname del emisor
       string senderNick;
       {
         lock_guard<mutex> lock(clientsMutex);
@@ -159,8 +195,10 @@ void readThread(int socketConn) {
         }
       }
 
-      cout << "Mensaje privado de [" << senderNick << "] a [" << destNick
-           << "]: " << msg << endl;
+      cout << "Mensaje privado de [" << senderNick << "] a [" << destNick << "]: " << msg << endl;
+
+      // GUARDAR EN HISTORIAL (TEXTO)
+      guardarMensajeTexto("T", senderNick, destNick, msg);
 
       lock_guard<mutex> lock(clientsMutex);
       auto it = m_clients.find(destNick);
@@ -168,7 +206,6 @@ void readThread(int socketConn) {
         int destSock = it->second;
         string proto = "T" + padNumber(senderNick.size(), 2) + senderNick +
                        padNumber(msg.size(), 3) + msg;
-        cout << "[" << proto << "]\n";
         write(destSock, proto.c_str(), proto.size());
       } else {
         string err = "e03ERR";
@@ -178,26 +215,45 @@ void readThread(int socketConn) {
     }
     case 'l': {
       lock_guard<mutex> lock(clientsMutex);
-
       int numUsers = m_clients.size();
       string proto = "L" + padNumber(numUsers, 2);
-
       for (auto &p : m_clients) {
         const string &nick = p.first;
         proto += padNumber((int)nick.size(), 2) + nick;
       }
-
-      cout << "Listado protocolo [" << proto << "]: " << "\n";
       write(socketConn, proto.c_str(), proto.size());
       break;
     }
+    case 'h': { // 'h' para historial (TEXTO)
+        cout << "Cliente solicitó historial del chat" << endl;
+        
+        ifstream archivo("historial_chat.txt");
+        string historialCompleto;
+        string linea;
+        
+        while (getline(archivo, linea)) {
+            historialCompleto += linea + "\n";
+        }
+        
+        if (historialCompleto.empty()) {
+            string respuesta = "HNo hay historial disponible";
+            write(socketConn, respuesta.c_str(), respuesta.size());
+        } else {
+            string respuesta = "H" + padNumber(historialCompleto.size(), 6) + historialCompleto;
+            write(socketConn, respuesta.c_str(), respuesta.size());
+        }
+        break;
+    }
     case 'x': {
       string nick;
-      for (auto it = m_clients.begin(); it != m_clients.end(); ++it) {
-        if (it->second == socketConn) {
-          nick = it->first;
-          m_clients.erase(it);
-          break;
+      {
+        lock_guard<mutex> lock(clientsMutex);
+        for (auto it = m_clients.begin(); it != m_clients.end(); ++it) {
+          if (it->second == socketConn) {
+            nick = it->first;
+            m_clients.erase(it);
+            break;
+          }
         }
       }
       close(socketConn);
@@ -217,26 +273,13 @@ void readThread(int socketConn) {
 int main(void) {
   struct sockaddr_in stSockAddr;
   int SocketServer = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
-  char buffer[256];
-  int n;
-  string buf;
 
   if (-1 == SocketServer) {
     perror("can not create socket");
     exit(EXIT_FAILURE);
   }
 
-
-    // 🔹 Permitir reutilizar el puerto inmediatamente tras cerrar el servidor
-  int opt = 1;
-  if (setsockopt(SocketServer, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
-    perror("setsockopt(SO_REUSEADDR) failed");
-    close(SocketServer);
-    exit(EXIT_FAILURE);
-  }
-  
   memset(&stSockAddr, 0, sizeof(struct sockaddr_in));
-
   stSockAddr.sin_family = AF_INET;
   stSockAddr.sin_port = htons(45000);
   stSockAddr.sin_addr.s_addr = INADDR_ANY;
@@ -254,8 +297,28 @@ int main(void) {
     exit(EXIT_FAILURE);
   }
 
-  for (;;) {
+  cout << "Servidor iniciado en puerto 45000 (Modo TEXTO)" << endl;
+  cout << "Comandos del servidor:" << endl;
+  cout << "  - 'historial': Ver historial del chat" << endl;
+  cout << "  - 'quit': Salir del servidor" << endl;
 
+  thread serverThread([]() {
+      string comando;
+      while (true) {
+          cout << "\nServidor> ";
+          getline(cin, comando);
+          
+          if (comando == "historial") {
+              leerHistorialServidor();
+          } else if (comando == "quit") {
+              cout << "Apagando servidor..." << endl;
+              exit(0);
+          }
+      }
+  });
+  serverThread.detach();
+
+  for (;;) {
     int ConnectFD = accept(SocketServer, NULL, NULL);
     if (ConnectFD == -1) {
       perror("accept failed");

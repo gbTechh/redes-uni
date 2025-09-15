@@ -13,6 +13,8 @@
 #include <sys/types.h>
 #include <thread>
 #include <unistd.h>
+#include <fstream>
+#include <ctime>
 
 using namespace std;
 
@@ -24,6 +26,84 @@ string padNumber(int num, int width) {
   if ((int)s.size() < width)
     s = string(width - s.size(), '0') + s;
   return s;
+}
+
+// Función para guardar mensajes en archivo binario
+void guardarMensajeHistorial(const string& tipo, const string& remitente, 
+                            const string& destinatario, const string& mensaje) {
+    ofstream archivo("historial_chat.bin", ios::binary | ios::app);
+    
+    if (archivo) {
+        // Timestamp (fecha/hora actual)
+        time_t ahora = time(nullptr);
+        archivo.write((char*)&ahora, sizeof(ahora));
+        
+        // Tipo de mensaje (1 byte)
+        char tipoChar = tipo[0];
+        archivo.write(&tipoChar, 1);
+        
+        // Longitud y remitente
+        uint16_t longRemitente = remitente.size();
+        archivo.write((char*)&longRemitente, sizeof(longRemitente));
+        archivo.write(remitente.c_str(), longRemitente);
+        
+        // Longitud y destinatario
+        uint16_t longDestinatario = destinatario.size();
+        archivo.write((char*)&longDestinatario, sizeof(longDestinatario));
+        archivo.write(destinatario.c_str(), longDestinatario);
+        
+        // Longitud y mensaje
+        uint32_t longMensaje = mensaje.size();
+        archivo.write((char*)&longMensaje, sizeof(longMensaje));
+        archivo.write(mensaje.c_str(), longMensaje);
+    }
+}
+
+// Función para leer el historial desde el servidor
+void leerHistorialServidor() {
+    ifstream archivo("historial_chat.bin", ios::binary);
+    
+    if (!archivo) {
+        cout << "No hay historial disponible" << endl;
+        return;
+    }
+    
+    cout << "\n=== HISTORIAL DEL CHAT (SERVER) ===" << endl;
+    
+    while (archivo) {
+        time_t fecha;
+        archivo.read((char*)&fecha, sizeof(fecha));
+        if (!archivo) break;
+        
+        char tipo;
+        archivo.read(&tipo, 1);
+        
+        uint16_t longRemitente;
+        archivo.read((char*)&longRemitente, sizeof(longRemitente));
+        string remitente(longRemitente, ' ');
+        archivo.read(&remitente[0], longRemitente);
+        
+        uint16_t longDestinatario;
+        archivo.read((char*)&longDestinatario, sizeof(longDestinatario));
+        string destinatario(longDestinatario, ' ');
+        archivo.read(&destinatario[0], longDestinatario);
+        
+        uint32_t longMensaje;
+        archivo.read((char*)&longMensaje, sizeof(longMensaje));
+        string mensaje(longMensaje, ' ');
+        archivo.read(&mensaje[0], longMensaje);
+        
+        // Formatear la fecha
+        char buffer[80];
+        strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", localtime(&fecha));
+        
+        if (tipo == 'M') {
+            cout << "[" << buffer << "] BROADCAST de " << remitente << ": " << mensaje << endl;
+        } else if (tipo == 'T') {
+            cout << "[" << buffer << "] PRIVADO de " << remitente << " para " << destinatario << ": " << mensaje << endl;
+        }
+    }
+    cout << "=== FIN DEL HISTORIAL ===" << endl;
 }
 
 void readThread(int socketConn) {
@@ -101,6 +181,9 @@ void readThread(int socketConn) {
 
       cout << "Broadcast de [" << senderNick << "]" << msg << endl;
 
+      // GUARDAR EN HISTORIAL
+      guardarMensajeHistorial("M", senderNick, "Todos", msg);
+
       lock_guard<mutex> lock(clientsMutex);
       string proto = "M" + padNumber(senderNick.size(), 2) + senderNick +
                      padNumber(msg.size(), 3) + msg;
@@ -162,6 +245,9 @@ void readThread(int socketConn) {
       cout << "Mensaje privado de [" << senderNick << "] a [" << destNick
            << "]: " << msg << endl;
 
+      // GUARDAR EN HISTORIAL
+      guardarMensajeHistorial("T", senderNick, destNick, msg);
+
       lock_guard<mutex> lock(clientsMutex);
       auto it = m_clients.find(destNick);
       if (it != m_clients.end()) {
@@ -191,13 +277,41 @@ void readThread(int socketConn) {
       write(socketConn, proto.c_str(), proto.size());
       break;
     }
+    case 'h': { // 'h' para historial
+        cout << "Cliente solicitó historial del chat" << endl;
+        
+        // Enviar historial en formato de texto simple
+        ifstream archivo("historial_chat.bin", ios::binary);
+        string historialCompleto;
+        
+        if (archivo) {
+            archivo.seekg(0, ios::end);
+            size_t fileSize = archivo.tellg();
+            archivo.seekg(0, ios::beg);
+            
+            historialCompleto.resize(fileSize);
+            archivo.read(&historialCompleto[0], fileSize);
+        }
+        
+        if (historialCompleto.empty()) {
+            string respuesta = "H000000No hay historial disponible";
+            write(socketConn, respuesta.c_str(), respuesta.size());
+        } else {
+            string respuesta = "H" + padNumber(historialCompleto.size(), 6) + historialCompleto;
+            write(socketConn, respuesta.c_str(), respuesta.size());
+        }
+        break;
+    }
     case 'x': {
       string nick;
-      for (auto it = m_clients.begin(); it != m_clients.end(); ++it) {
-        if (it->second == socketConn) {
-          nick = it->first;
-          m_clients.erase(it);
-          break;
+      {
+        lock_guard<mutex> lock(clientsMutex);
+        for (auto it = m_clients.begin(); it != m_clients.end(); ++it) {
+          if (it->second == socketConn) {
+            nick = it->first;
+            m_clients.erase(it);
+            break;
+          }
         }
       }
       close(socketConn);
@@ -245,8 +359,31 @@ int main(void) {
     exit(EXIT_FAILURE);
   }
 
-  for (;;) {
+  cout << "Servidor iniciado en puerto 45000" << endl;
+  cout << "Comandos del servidor:" << endl;
+  cout << "  - 'historial': Ver historial del chat" << endl;
+  cout << "  - 'quit': Salir del servidor" << endl;
 
+  // Hilo para comandos del servidor
+  thread serverThread([]() {
+      string comando;
+      while (true) {
+          cout << "\nServidor> ";
+          getline(cin, comando);
+          
+          if (comando == "historial") {
+              leerHistorialServidor();
+          } else if (comando == "quit") {
+              cout << "Apagando servidor..." << endl;
+              exit(0);
+          } else if (!comando.empty()) {
+              cout << "Comando no reconocido: " << comando << endl;
+          }
+      }
+  });
+  serverThread.detach();
+
+  for (;;) {
     int ConnectFD = accept(SocketServer, NULL, NULL);
     if (ConnectFD == -1) {
       perror("accept failed");
