@@ -1,5 +1,5 @@
-// client_simple.cpp
 #include <arpa/inet.h>
+#include <fstream>
 #include <iostream>
 #include <netinet/in.h>
 #include <stdio.h>
@@ -12,6 +12,44 @@
 #include <unistd.h>
 
 using namespace std;
+
+string leerArchivo(string filename) {
+  ifstream archivo(filename, ios::binary | ios::ate);
+  if (!archivo) {
+    cout << "Error: No se pudo abrir el archivo '" << filename << "'" << endl;
+    return "";
+  }
+
+  streamsize size = archivo.tellg();
+  archivo.seekg(0, ios::beg);
+
+  string content(size, '\0');
+  if (archivo.read(&content[0], size)) {
+    return content;
+  }
+
+  return "";
+}
+
+void guardarArchivo(const string &filename, const string &data) {
+  string nombreDestino;
+  size_t puntoPos = filename.find_last_of('.');
+
+  if (puntoPos != string::npos) {
+    nombreDestino =
+        filename.substr(0, puntoPos) + "-destino" + filename.substr(puntoPos);
+  } else {
+    nombreDestino = filename + "-destino";
+  }
+
+  ofstream archivo(nombreDestino, ios::binary);
+  if (archivo) {
+    archivo.write(data.c_str(), data.size());
+    archivo.close();
+  } else {
+    cout << "Error al guardar el archivo: " << nombreDestino << endl;
+  }
+}
 
 string padNumber(int num, int width) {
   string s = to_string(num);
@@ -117,7 +155,61 @@ void readThreadFn(int socketConn) {
       cout << "\n[Error del servidor] " << errMsg << endl;
       break;
     }
+    case 'F': {
+      string lenStr;
+      for (int i = 0; i < 2; ++i) {
+        char c;
+        if (read(socketConn, &c, 1) <= 0)
+          return;
+        lenStr += c;
+      }
+      int destLen = stoi(lenStr);
 
+      string destNick;
+      for (int i = 0; i < destLen; ++i) {
+        char c;
+        if (read(socketConn, &c, 1) <= 0)
+          return;
+        destNick += c;
+      }
+
+      string sizeFilename;
+      for (int i = 0; i < 3; ++i) {
+        char c;
+        if (read(socketConn, &c, 1) <= 0)
+          return;
+        sizeFilename += c;
+      }
+      int msgLen = stoi(sizeFilename);
+
+      string filename;
+      for (int i = 0; i < msgLen; ++i) {
+        char c;
+        if (read(socketConn, &c, 1) <= 0)
+          return;
+        filename += c;
+      }
+
+      string sizeFileData;
+      for (int i = 0; i < 10; ++i) {
+        char c;
+        if (read(socketConn, &c, 1) <= 0)
+          return;
+        sizeFileData += c;
+      }
+      long fileLen = stoi(sizeFileData);
+
+      string fileData;
+      for (int i = 0; i < fileLen; ++i) {
+        char c;
+        if (read(socketConn, &c, 1) <= 0)
+          return;
+        fileData += c;
+      }
+
+      guardarArchivo(filename, fileData);
+      break;
+    }
     case 'L': {
       // cantidad de usuarios
       string countStr;
@@ -163,6 +255,7 @@ void readThreadFn(int socketConn) {
   }
   cout << "Lectura: conexión cerrada por el servidor (o error).\n";
 }
+
 int main() {
   int port = 45000;
   const char *serverIP = "127.0.0.1";
@@ -213,7 +306,8 @@ int main() {
     cout << "1. Enviar mensaje a un cliente (privado)\n";
     cout << "2. Enviar mensaje a todos los clientes (broadcast)\n";
     cout << "3. Listar todos los clientes conectados\n";
-    cout << "4. Salir (Cerrar conexion)\n";
+    cout << "4. Enviar un archivo\n";
+    cout << "5. Salir (Cerrar conexion)\n";
     cout << "Seleccione una opcion: ";
     if (!(cin >> opt)) {
       cin.clear();
@@ -248,6 +342,21 @@ int main() {
       write(SocketCli, payload.c_str(), payload.size());
       cout << "[" << payload << "]\n";
     } else if (opt == 4) {
+      string dest, filename;
+      cout << "Ingrese el nickname del destinatario: ";
+      getline(cin, dest);
+      cout << "Escriba el nombre del archivo: ";
+      getline(cin, filename);
+
+      // leer el archivo
+      string fileData = leerArchivo(filename);
+      string payload = "f" + padNumber((int)dest.size(), 2) + dest +
+                       padNumber((int)filename.size(), 3) + filename +
+                       padNumber((int)fileData.size(), 10) + fileData;
+
+      cout << "PAYLOAD CLIENTE: " << payload << "\n";
+      write(SocketCli, payload.c_str(), payload.size());
+    } else if (opt == 5) {
       // mandar 'x' para indicar salida al servidor
       string payload = "x";
       write(SocketCli, payload.c_str(), payload.size());
@@ -257,7 +366,7 @@ int main() {
       cout << "Opcion no valida\n";
     }
 
-  } while (opt != 4);
+  } while (opt != 5);
 
   // cerrar y esperar hilo lector
   shutdown(SocketCli, SHUT_RDWR);
