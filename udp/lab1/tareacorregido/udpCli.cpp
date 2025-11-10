@@ -1,5 +1,6 @@
-// Client UDP Version
+// Client UDP Version - CORREGIDO con lectura UDP
 #include <arpa/inet.h>
+#include <chrono>
 #include <iostream>
 #include <netinet/in.h>
 #include <stdio.h>
@@ -15,7 +16,7 @@
 using namespace std;
 
 #define PORT 45000
-#define BUFFER_SIZE 1024
+#define BUFFER_SIZE 777
 
 void printPlays(vector<string> &v_plays) {
   for (size_t i = 0; i < v_plays.size(); i++) {
@@ -46,124 +47,159 @@ string padNumber(int num, int width) {
 
 struct sockaddr_in servaddr;
 
-void sendToServer(int sockfd, const string &message) {
-  sendto(sockfd, message.c_str(), message.size(), 0,
-         (const struct sockaddr *)&servaddr, sizeof(servaddr));
+void sendToServer(int sockfd, string message) {
+  if (message.size() > 777) {
+    char messageType = message[0];
+    string messageData = message.substr(1);
+
+    int maxDataPerFragment = 777 - 1 - 7;
+    int totalFragments =
+        (messageData.size() + maxDataPerFragment - 1) / maxDataPerFragment;
+
+    for (int i = 0; i < totalFragments; i++) {
+      int start = i * maxDataPerFragment;
+      int size = min(maxDataPerFragment, (int)messageData.size() - start);
+      string fragmentData = messageData.substr(start, size);
+
+      string fragHeader =
+          padNumber(i + 1, 3) + "|" + padNumber(totalFragments, 3); // 003|003
+
+      string fragmentMessage =
+          string(1, messageType) + fragHeader + fragmentData;
+      fragmentMessage.resize(777, '#');
+
+      sendto(sockfd, fragmentMessage.c_str(), 777, 0,
+             (const struct sockaddr *)&servaddr, sizeof(servaddr));
+    }
+  } else {
+    string msg = message;
+    msg.resize(777, '#');
+    sendto(sockfd, msg.c_str(), msg.size(), 0,
+           (const struct sockaddr *)&servaddr, sizeof(servaddr));
+  }
 }
 
 void readThreadFn(int socketConn) {
   char buffer[BUFFER_SIZE];
+  struct sockaddr_in fromAddr;
+  socklen_t fromLen = sizeof(fromAddr);
 
   while (true) {
-    struct sockaddr_in fromAddr;
-    socklen_t len = sizeof(fromAddr);
-
-    ssize_t n = recvfrom(socketConn, (char *)buffer, BUFFER_SIZE, MSG_WAITALL,
-                         (struct sockaddr *)&fromAddr, &len);
-
-    if (n <= 0)
+    ssize_t n = recvfrom(socketConn, buffer, BUFFER_SIZE - 1, 0,
+                         (struct sockaddr *)&fromAddr, &fromLen);
+    if (n <= 0) {
       break;
+    }
 
     buffer[n] = '\0';
     string message(buffer, n);
 
+    if (message.empty())
+      continue;
+
     char type = message[0];
-    string content = message.substr(1);
 
     switch (type) {
     case 'T': {
-      if (content.size() < 2)
-        break;
+      if (message.size() < 3)
+        continue;
 
-      string lenNickStr = content.substr(0, 2);
+      string lenNickStr = message.substr(1, 2);
       int lenNick = stoi(lenNickStr);
 
-      if (content.size() < 2 + lenNick)
-        break;
-      string sender = content.substr(2, lenNick);
+      if (message.size() < 3 + lenNick)
+        continue;
+      string sender = message.substr(3, lenNick);
 
-      if (content.size() < 2 + lenNick + 3)
-        break;
-      string lenMsgStr = content.substr(2 + lenNick, 3);
+      if (message.size() < 3 + lenNick + 3)
+        continue;
+      string lenMsgStr = message.substr(3 + lenNick, 3);
       int lenMsg = stoi(lenMsgStr);
 
-      if (content.size() < 2 + lenNick + 3 + lenMsg)
-        break;
-      string msg = content.substr(2 + lenNick + 3, lenMsg);
+      if (message.size() < 3 + lenNick + 3 + lenMsg)
+        continue;
+      string msg = message.substr(3 + lenNick + 3, lenMsg);
 
       cout << "\n[Privado de " << sender << "] " << msg << endl;
       break;
     }
-    case 'M': {
-      if (content.size() < 2)
-        break;
 
-      string lenNickStr = content.substr(0, 2);
+    case 'M': {
+      if (message.size() < 3)
+        continue;
+
+      string lenNickStr = message.substr(1, 2);
       int lenNick = stoi(lenNickStr);
 
-      if (content.size() < 2 + lenNick)
-        break;
-      string sender = content.substr(2, lenNick);
+      if (message.size() < 3 + lenNick)
+        continue;
+      string sender = message.substr(3, lenNick);
 
-      if (content.size() < 2 + lenNick + 3)
-        break;
-      string lenMsgStr = content.substr(2 + lenNick, 3);
+      if (message.size() < 3 + lenNick + 3)
+        continue;
+      string lenMsgStr = message.substr(3 + lenNick, 3);
       int lenMsg = stoi(lenMsgStr);
 
-      if (content.size() < 2 + lenNick + 3 + lenMsg)
-        break;
-      string msg = content.substr(2 + lenNick + 3, lenMsg);
+      if (message.size() < 3 + lenNick + 3 + lenMsg)
+        continue;
+      string msg = message.substr(3 + lenNick + 3, lenMsg);
 
       cout << "\n[Broadcast de " << sender << "] " << msg << endl;
       break;
     }
+
     case 'V': {
-      if (content.size() < 1)
-        break;
+      if (message.size() < 2)
+        continue;
 
       inGame = true;
-      string play = content.substr(0, 1);
+      string play = message.substr(1, 1);
       cout << "Te toca jugar, tu jugada es [" << play << "]:\n";
       jugada = play;
       break;
     }
-    case 'v': {
-      if (content.size() < 9)
-        break;
 
-      string tablero = content.substr(0, 9);
+    case 'v': {
+      if (message.size() < 10)
+        continue;
+
+      string tablero = message.substr(1, 9);
       cout << "[TABLERO]\n";
       makeAndPrintPlays(tablero);
       break;
     }
-    case 'E': {
-      if (content.size() < 15)
-        break;
 
-      string errMsg = content.substr(0, 15);
+    case 'E': {
+      if (message.size() < 16)
+        continue;
+
+      string errMsg = message.substr(1, 15);
       cout << "\n[Error del servidor] " << errMsg << endl;
       break;
     }
-    case 'L': {
-      if (content.size() < 2)
-        break;
 
-      string countStr = content.substr(0, 2);
+    case 'L': {
+      if (message.size() < 3)
+        continue;
+
+      string countStr = message.substr(1, 2);
       int numUsers = stoi(countStr);
 
       cout << "\n[Usuarios conectados] ";
-      int pos = 2;
+
+      size_t pos = 3;
       for (int i = 0; i < numUsers; ++i) {
-        if (content.size() < pos + 2)
+        if (pos + 2 > message.size())
           break;
 
-        string lenStr = content.substr(pos, 2);
-        pos += 2;
+        string lenStr = message.substr(pos, 2);
         int len = stoi(lenStr);
+        pos += 2;
 
-        if (content.size() < pos + len)
+        if (pos + len > message.size())
           break;
-        string nick = content.substr(pos, len);
+
+        string nick = message.substr(pos, len);
         pos += len;
 
         cout << nick << " ";
@@ -171,13 +207,14 @@ void readThreadFn(int socketConn) {
       cout << endl;
       break;
     }
+
     default: {
       cout << "\n[Server err] Tipo desconocido: " << type << endl;
       break;
     }
     }
   }
-  cout << "Conexión con el servidor perdida." << endl;
+  cout << "Lectura: conexión cerrada por el servidor (o error).\n";
 }
 
 int main() {
@@ -207,12 +244,13 @@ int main() {
 
   string reg = "n" + padNumber((int)nickname.size(), 2) + nickname;
   sendToServer(SocketCli, reg);
-  cout << "Registro enviado: [" << reg << "]\n";
+  cout << "[" << reg << "]\n";
 
   thread reader(readThreadFn, SocketCli);
 
   int opt = 0;
   while (opt != 5) {
+
     cout << "\n--- MENU PRINCIPAL ---\n";
     cout << "1. Enviar mensaje a un cliente (privado)\n";
     cout << "2. Enviar mensaje a todos los clientes (broadcast)\n";
@@ -226,16 +264,12 @@ int main() {
       getline(cin, dummy);
       opt = 0;
     }
-    cin.ignore();
+    cin.ignore(); // limpiar \n restante
 
     if (opt == 1) {
       string payloadList = "l";
       sendToServer(SocketCli, payloadList);
-      cout << "Solicitando lista de usuarios...\n";
-
-      // Pequeña pausa para recibir la lista
-      this_thread::sleep_for(chrono::milliseconds(500));
-
+      cout << "[" << payloadList << "]\n";
       string dest, msg;
       cout << "Ingrese el nickname del destinatario: ";
       getline(cin, dest);
@@ -243,7 +277,7 @@ int main() {
       getline(cin, msg);
       string payload = "t" + padNumber((int)dest.size(), 2) + dest +
                        padNumber((int)msg.size(), 3) + msg;
-      cout << "Enviando mensaje privado: [" << payload << "]\n";
+      cout << "[" << payload << "]\n";
       sendToServer(SocketCli, payload);
 
     } else if (opt == 2) {
@@ -251,21 +285,25 @@ int main() {
       cout << "Escriba el mensaje para todos: ";
       getline(cin, msg);
       string payload = "m" + padNumber((int)msg.size(), 3) + msg;
-      cout << "Enviando broadcast: [" << payload << "]\n";
+      cout << "[" << payload << "]\n";
       sendToServer(SocketCli, payload);
 
     } else if (opt == 3) {
       string payload = "l";
       sendToServer(SocketCli, payload);
-      cout << "Solicitando lista de usuarios...\n";
+      cout << "[" << payload << "]\n";
 
     } else if (opt == 4) {
+
       if (inGame) {
         while (true) {
+
           string pos;
+
           cout << "\nSelecciona tu posicion [1-9]: ";
           getline(cin, pos);
 
+          // Validar entrada
           if (pos.length() != 1 || pos[0] < '1' || pos[0] > '9') {
             cout << "Posición inválida. Debe ser un número del 1 al 9.\n";
             continue;
@@ -277,22 +315,45 @@ int main() {
         }
       } else {
         string payload = "p";
-        cout << "Uniéndose al juego... [" << payload << "]\n";
+        cout << "[" << payload << "]\n";
         sendToServer(SocketCli, payload);
       }
 
+    } else if (opt == 7) {
+      string pos, play;
+      cout << "\nSelecciona tu posicion [1-9]: ";
+      getline(cin, pos);
+
+      // Validar entrada
+      if (pos.length() != 1 || pos[0] < '1' || pos[0] > '9') {
+        cout << "Posición inválida. Debe ser un número del 1 al 9.\n";
+        continue;
+      }
+
+      cout << "\nSelecciona tu jugada [x/o]: ";
+      getline(cin, play);
+
+      // Validar jugada
+      if (play.length() != 1 || (play[0] != 'x' && play[0] != 'o')) {
+        cout << "Jugada inválida. Debe ser 'x' u 'o'.\n";
+        continue;
+      }
+      string payload = "w" + pos + play;
+      cout << "Enviando jugada: [" << payload << "]\n";
+      sendToServer(SocketCli, payload);
+
     } else if (opt == 5) {
+      // mandar 'x' para indicar salida al servidor
       string payload = "x";
       sendToServer(SocketCli, payload);
-      cout << "Desconectando... [" << payload << "]\n";
+      cout << "[" << payload << "]\n";
       break;
     } else {
       cout << "Opcion no valida\n";
     }
   }
 
-  // Pequeña pausa antes de cerrar
-  this_thread::sleep_for(chrono::seconds(1));
+  // cerrar y esperar hilo lector
   close(SocketCli);
   if (reader.joinable())
     reader.join();

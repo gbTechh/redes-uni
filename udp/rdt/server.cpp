@@ -1,5 +1,4 @@
-/* Server code in C++ - UDP Version - Corregido */
-
+// Server code in C++ - UDP Version - Go-Back-N (GBN) Implementation
 #include <algorithm>
 #include <arpa/inet.h>
 #include <iostream>
@@ -22,9 +21,58 @@ using namespace std;
 #define PORT 45000
 #define BUFFER_SIZE 777
 
-// Buffer de fragmentos
-map<string, map<int, string>> fragmentBuffers;
+// Mapa para guardar el siguiente número de secuencia esperado por cada cliente
+// (GBN Receiver)
+map<string, int> clientExpectedSeqNum;
 
+struct Packet {
+  int seqnum;
+  int acknum;
+  int checksum;
+  string payload;
+};
+
+string serializePacket(const Packet &pkt) {
+  string result;
+  result += to_string(pkt.seqnum) + "|";
+  result += to_string(pkt.acknum) + "|";
+  result += to_string(pkt.checksum) + "|";
+  result += pkt.payload;
+  return result;
+}
+Packet deserializePacket(const string &data) {
+  Packet pkt;
+  size_t pos1 = data.find('|');
+  size_t pos2 = data.find('|', pos1 + 1);
+  size_t pos3 = data.find('|', pos2 + 1);
+
+  if (pos1 == string::npos || pos2 == string::npos || pos3 == string::npos) {
+    pkt.seqnum = -1;
+    return pkt;
+  }
+
+  try {
+    pkt.seqnum = stoi(data.substr(0, pos1));
+    pkt.acknum = stoi(data.substr(pos1 + 1, pos2 - pos1 - 1));
+    pkt.checksum = stoi(data.substr(pos2 + 1, pos3 - pos2 - 1));
+    pkt.payload = data.substr(pos3 + 1);
+  } catch (...) {
+    pkt.seqnum = -1;
+  }
+  return pkt;
+}
+
+int calcularChecksum(const Packet &pkt) {
+  int suma = pkt.seqnum + pkt.acknum;
+  for (char c : pkt.payload) {
+    suma += (unsigned char)c;
+  }
+
+  // COUT de debug original mantenido
+  cout << "calculate cksum fn - suma: " << suma << endl;
+  int checksum = 255 - (suma % 256);
+  return checksum;
+}
 void printPlays(vector<string> &v_plays) {
   for (size_t i = 0; i < v_plays.size(); i++) {
     if (i % 3 == 0)
@@ -34,18 +82,25 @@ void printPlays(vector<string> &v_plays) {
   cout << "\n";
 }
 
-int play = 0;
-int currentTurn = 0;
-static vector<string> v_plays(9, " ");
+string padNumber(int num, int width) {
+  string s = to_string(num);
+  if ((int)s.size() < width)
+    s = string(width - s.size(), '0') + s;
+  return s;
+}
 
-char getPlay() {
-  if (play % 2 == 0) {
-    play++;
-    return 'o';
-  } else {
-    play++;
-    return 'x';
+string getClientKey(const struct sockaddr_in &addr) {
+  char ip[INET_ADDRSTRLEN];
+  inet_ntop(AF_INET, &(addr.sin_addr), ip, INET_ADDRSTRLEN);
+  return string(ip) + ":" + to_string(ntohs(addr.sin_port));
+}
+
+string removePadding(const string &message) {
+  size_t pos = message.find('#');
+  if (pos != string::npos) {
+    return message.substr(0, pos);
   }
+  return message;
 }
 
 struct ClientInfo {
@@ -54,21 +109,49 @@ struct ClientInfo {
 };
 
 map<string, ClientInfo> m_clients; // nickname -> ClientInfo
-vector<string> q_players;          // almacena nicknames en lugar de sockets
+vector<string> q_players;          // almacena nicknames
 mutex clientsMutex;
 mutex gameMutex;
 
-string padNumber(int num, int width) {
-  string s = to_string(num);
-  if ((int)s.size() < width)
-    s = string(width - s.size(), '0') + s;
-  return s;
+int currentTurn = 0;
+static vector<string> v_plays(9, " ");
+
+void sendACK(int sockfd, const struct sockaddr_in &clientAddr, int ackNum) {
+
+  Packet pkt;
+  pkt.seqnum = 0;
+  pkt.acknum = ackNum;
+  pkt.payload = "ACK";
+  pkt.checksum = calcularChecksum(pkt);
+
+  string serialized = serializePacket(pkt);
+  serialized.resize(BUFFER_SIZE, '#');
+
+  cout << "[Server GBN] Enviando ACK #" << ackNum
+       << " a cliente: " << getClientKey(clientAddr) << endl;
+
+  sendto(sockfd, serialized.c_str(), serialized.size(), 0,
+         (const struct sockaddr *)&clientAddr, sizeof(clientAddr));
 }
 
 void sendToClient(int sockfd, const string &message,
                   const struct sockaddr_in &clientAddr) {
-  sendto(sockfd, message.c_str(), message.size(), 0,
+
+  Packet pkt;
+  pkt.seqnum = 0;
+  pkt.acknum = 0; // No es un ACK
+  pkt.payload = message;
+  pkt.checksum = calcularChecksum(pkt);
+
+  string serialized = serializePacket(pkt);
+  serialized.resize(BUFFER_SIZE, '#');
+
+  cout << "SEN TO CLIENTE SERIALIZED: " << serialized << endl;
+  cout << "Serialized size: " << serialized.size() << endl;
+
+  sendto(sockfd, serialized.c_str(), serialized.size(), 0,
          (const struct sockaddr *)&clientAddr, sizeof(clientAddr));
+  cout << "[Server] Enviado mensaje de respuesta: [" << message << "]" << endl;
 }
 
 void broadcastBoard(int sockfd) {
@@ -86,34 +169,14 @@ void broadcastBoard(int sockfd) {
   }
 }
 
-string getClientKey(const struct sockaddr_in &addr) {
-  char ip[INET_ADDRSTRLEN];
-  inet_ntop(AF_INET, &(addr.sin_addr), ip, INET_ADDRSTRLEN);
-  return string(ip) + ":" + to_string(ntohs(addr.sin_port));
-}
-
-// Función auxiliar para limpiar el padding '#'
-string removePadding(const string &message) {
-  size_t pos = message.find('#');
-  if (pos != string::npos) {
-    return message.substr(0, pos);
-  }
-  return message;
-}
-
-// Función para procesar mensajes normales (sin fragmentación)
 void processNormalMessage(int sockfd, string message,
                           const struct sockaddr_in &clientAddr) {
   if (message.empty())
     return;
 
-  // Limpiar padding antes de procesar
-  // message = removePadding(message);
-
-  if (message.empty())
-    return;
-
   char type = message[0];
+  cout << "[Process] Procesando mensaje tipo: " << type << " con contenido: ["
+       << message.substr(1) << "]" << endl;
 
   switch (type) {
   case 'n': {
@@ -134,11 +197,11 @@ void processNormalMessage(int sockfd, string message,
       sendToClient(sockfd, err, clientAddr);
       cout << "Cliente intentó usar nickname repetido: " << nickname << endl;
     } else {
-      // Registrar nuevo cliente
       ClientInfo clientInfo;
       clientInfo.address = clientAddr;
       clientInfo.nickname = nickname;
       m_clients[nickname] = clientInfo;
+
       cout << "Nuevo cliente registrado con nickname[" << type << lenStr
            << nickname << "]: " << nickname << endl;
     }
@@ -203,7 +266,6 @@ void processNormalMessage(int sockfd, string message,
       return;
     string msg = message.substr(3 + destLen + 3, msgLen);
 
-    // obtener nickname del emisor
     string senderNick;
     {
       lock_guard<mutex> lock(clientsMutex);
@@ -230,8 +292,11 @@ void processNormalMessage(int sockfd, string message,
       cout << "[" << proto << "]\n";
       sendToClient(sockfd, proto, it->second.address);
     } else {
-      string err = "e03ERR";
+      string err = "E015Elclientenoexi";
       sendToClient(sockfd, err, clientAddr);
+      // COUT de error mantenido
+      cout << "Error: Cliente de destino [" << destNick << "] no encontrado."
+           << endl;
     }
     break;
   }
@@ -241,6 +306,7 @@ void processNormalMessage(int sockfd, string message,
     int numUsers = m_clients.size();
     string proto = "L" + padNumber(numUsers, 2);
 
+    cout << "Construyendo listado de " << numUsers << " usuarios..." << endl;
     for (auto &p : m_clients) {
       const string &nick = p.first;
       proto += padNumber((int)nick.size(), 2) + nick;
@@ -250,12 +316,12 @@ void processNormalMessage(int sockfd, string message,
     sendToClient(sockfd, proto, clientAddr);
     break;
   }
-  case 'p': {
-    lock_guard<mutex> lock(gameMutex);
+  case 'p': { // Solicitar jugar
+    lock_guard<mutex> lockG(gameMutex);
 
     string senderNick;
     {
-      lock_guard<mutex> lock(clientsMutex);
+      lock_guard<mutex> lockC(clientsMutex);
       for (auto &p : m_clients) {
         if (p.second.address.sin_addr.s_addr == clientAddr.sin_addr.s_addr &&
             p.second.address.sin_port == clientAddr.sin_port) {
@@ -278,6 +344,8 @@ void processNormalMessage(int sockfd, string message,
       } else if (q_players.size() == 2) {
         cout << "Jugador 2 [" << senderNick << "] se unió. ¡Iniciando juego!\n";
 
+        fill(v_plays.begin(), v_plays.end(), " ");
+
         broadcastBoard(sockfd);
 
         currentTurn = 0;
@@ -288,7 +356,6 @@ void processNormalMessage(int sockfd, string message,
         cout << "👁️  Espectador [" << senderNick << "] (posición "
              << q_players.size() << ")\n";
 
-        // Enviar tablero actual al espectador
         string plays;
         for (size_t i = 0; i < v_plays.size(); i++) {
           plays += v_plays[i];
@@ -302,20 +369,24 @@ void processNormalMessage(int sockfd, string message,
     break;
   }
   case 'w': {
-    lock_guard<mutex> lock(gameMutex);
+    lock_guard<mutex> lockG(gameMutex);
 
     if (message.size() < 3)
       return;
 
-    // Leer jugada (x u o)
     string playPlayer = message.substr(1, 1);
-    // Leer posición (1-9)
     string pos = message.substr(2, 1);
-    int position = stoi(pos);
+    int position;
+    try {
+      position = stoi(pos);
+    } catch (...) {
+      cout << "Error: Posición de jugada no es un número." << endl;
+      return;
+    }
 
     string senderNick;
     {
-      lock_guard<mutex> lock(clientsMutex);
+      lock_guard<mutex> lockC(clientsMutex);
       for (auto &p : m_clients) {
         if (p.second.address.sin_addr.s_addr == clientAddr.sin_addr.s_addr &&
             p.second.address.sin_port == clientAddr.sin_port) {
@@ -330,26 +401,33 @@ void processNormalMessage(int sockfd, string message,
 
     auto it = find(q_players.begin(), q_players.end(), senderNick);
     if (it == q_players.end() || (it - q_players.begin()) > 1) {
-      cout << "Jugada rechazada: no es jugador activo\n";
-      break;
+      cout << "Jugada rechazada: [" << senderNick << "] no es jugador activo\n";
+      return;
     }
 
     int playerIndex = it - q_players.begin();
     if (playerIndex != currentTurn) {
-      cout << "Jugada rechazada: no es su turno\n";
-      break;
+      cout << "Jugada rechazada: no es su turno. Es turno de jugador "
+           << (currentTurn + 1) << endl;
+      return;
     }
 
-    cout << "✓ Jugada recibida: " << playPlayer << " en posición " << position
-         << endl;
+    // Validar posición
+    if (position < 1 || position > 9 || v_plays[position - 1] != " ") {
+      string err = "E015Posicioninval";
+      sendToClient(sockfd, err, clientAddr);
+      cout << "Jugada inválida en posición " << position << endl;
+      return;
+    }
 
-    // Actualizar tablero
+    cout << "✓ Jugada recibida de [" << senderNick << "]: " << playPlayer
+         << " en posición " << position << endl;
+
     v_plays[position - 1] = playPlayer;
 
-    // Broadcast del tablero a todos
     broadcastBoard(sockfd);
 
-    // Alternar turno (solo entre los 2 primeros jugadores)
+    // Alternar turno
     if (q_players.size() >= 2) {
       currentTurn = 1 - currentTurn; // Alternar entre 0 y 1
       char nextPlay = (currentTurn == 0) ? 'o' : 'x';
@@ -361,35 +439,7 @@ void processNormalMessage(int sockfd, string message,
     }
     break;
   }
-  case 'v': {
-    lock_guard<mutex> lock(gameMutex);
-    string senderNick;
-    {
-      lock_guard<mutex> lock(clientsMutex);
-      for (auto &p : m_clients) {
-        if (p.second.address.sin_addr.s_addr == clientAddr.sin_addr.s_addr &&
-            p.second.address.sin_port == clientAddr.sin_port) {
-          senderNick = p.first;
-          break;
-        }
-      }
-    }
-
-    if (senderNick.empty())
-      return;
-
-    cout << "Jugador conectado para jugar Tic-tac-toe [" << senderNick << "]\n";
-
-    string plays;
-    for (size_t i = 0; i < v_plays.size(); i++) {
-      plays += v_plays[i];
-    }
-    printPlays(v_plays);
-    string proto = "v" + plays;
-    sendToClient(sockfd, proto, clientAddr);
-    break;
-  }
-  case 'x': {
+  case 'x': { // Salida del cliente
     lock_guard<mutex> lockC(clientsMutex);
     string nick;
     for (auto it = m_clients.begin(); it != m_clients.end(); ++it) {
@@ -397,11 +447,12 @@ void processNormalMessage(int sockfd, string message,
           it->second.address.sin_port == clientAddr.sin_port) {
         nick = it->first;
         m_clients.erase(it);
+        cout << "Cliente [" << nick << "] eliminado de la lista de clientes."
+             << endl;
         break;
       }
     }
 
-    // Remover de la cola de jugadores
     {
       lock_guard<mutex> lockG(gameMutex);
       auto it = find(q_players.begin(), q_players.end(), nick);
@@ -410,8 +461,9 @@ void processNormalMessage(int sockfd, string message,
         q_players.erase(it);
 
         cout << "Cliente [" << nick << "] desconectado (era posición "
-             << (playerPosition + 1) << ")\n";
+             << (playerPosition + 1) << ") y eliminado de la cola de juego.\n";
 
+        // Lógica de juego mantenida
         if (playerPosition < 2 && q_players.size() >= 2) {
           cout << "El espectador ahora es Jugador " << (playerPosition + 1)
                << "\n";
@@ -442,67 +494,55 @@ void handleClientMessage(int sockfd, const string &rawMessage,
                          const struct sockaddr_in &clientAddr) {
   if (rawMessage.empty())
     return;
-  cout << rawMessage << "\n";
-  // Primero limpiamos el padding del mensaje recibido
-  string message = removePadding(rawMessage);
 
-  if (message.empty())
+  cout << "MESSAGE: " << rawMessage << endl;
+
+  Packet receivedPkt = deserializePacket(rawMessage);
+
+  if (receivedPkt.seqnum == -1) {
+    cout << "ERROR: Paquete recibido con formato inválido. Descartando."
+         << endl;
     return;
+  }
 
-  char type = message[0];
+  string payloadWithoutPadding = removePadding(receivedPkt.payload);
+  Packet tempPkt = receivedPkt;
+  tempPkt.payload = payloadWithoutPadding;
+
+  if (calcularChecksum(tempPkt) != receivedPkt.checksum) {
+    cout << "ERROR: Checksum incorrecto para PKT #" << receivedPkt.seqnum
+         << ". Descartando paquete." << endl;
+    return;
+  }
+
   string clientKey = getClientKey(clientAddr);
 
-  // Verificar si es un mensaje fragmentado
-  if (message.size() > 7 && message[4] == '|') {
+  if (clientExpectedSeqNum.find(clientKey) == clientExpectedSeqNum.end()) {
+    clientExpectedSeqNum[clientKey] = 0;
+  }
+  int expected = clientExpectedSeqNum[clientKey];
 
-    string fragInfo = message.substr(1, 7);       // "001|003"
-    string fragNumStr = fragInfo.substr(0, 3);    // "001"
-    string totalFragsStr = fragInfo.substr(4, 3); // "003"
+  if (receivedPkt.seqnum == expected) {
 
-    int fragNum = stoi(fragNumStr);          // 1
-    int totalFrags = stoi(totalFragsStr);    // 3
-    string fragmentData = message.substr(8); // datos después del header
+    cout << "[Server GBN] Recibido PKT #" << receivedPkt.seqnum
+         << " (ESPERADO). Procesando payload..." << endl;
 
-    cout << "Recibiendo fragmento " << fragNum << "/" << totalFrags << " de "
-         << clientKey << endl;
+    string message = payloadWithoutPadding;
 
-    // save in map
-    fragmentBuffers[clientKey][fragNum] = fragmentData;
+    clientExpectedSeqNum[clientKey]++;
 
-    // check all framgments
-    bool haveAllFragments = true;
-    for (int i = 1; i <= totalFrags; i++) {
-      if (fragmentBuffers[clientKey].find(i) ==
-          fragmentBuffers[clientKey].end()) {
-        haveAllFragments = false;
-        break;
-      }
-    }
+    sendACK(sockfd, clientAddr, clientExpectedSeqNum[clientKey]);
 
-    // SI TENEMOS TODOS, REENSAMBLAR
-    if (haveAllFragments) {
-      cout << "Reensamblando mensaje completo de " << clientKey << endl;
-
-      string fullMessage = string(1, type); // Tipo original
-
-      // Concatenar todos los fragmentos en orden
-      for (int i = 1; i <= totalFrags; i++) {
-        fullMessage += fragmentBuffers[clientKey][i];
-      }
-
-      // LIMPIAR buffer
-      fragmentBuffers[clientKey].clear();
-
-      cout << "Mensaje reensamblado, tipo: " << fullMessage[0]
-           << ", tamaño: " << fullMessage.size() << endl;
-
-      // PROCESAR mensaje completo (sin info de fragmentación)
-      processNormalMessage(sockfd, fullMessage, clientAddr);
-    }
+    processNormalMessage(sockfd, message, clientAddr);
 
   } else {
-    // Mensaje normal (ya limpio de padding)
-    processNormalMessage(sockfd, message, clientAddr);
+
+    cout << "[Server GBN] Recibido PKT #" << receivedPkt.seqnum
+         << " (FUERA DE ORDEN/DUPLICADO). Esperado: " << expected << endl;
+
+    if (expected >= 0) {
+      sendACK(sockfd, clientAddr, expected);
+    }
   }
 }
 
@@ -516,7 +556,6 @@ int main(void) {
     exit(EXIT_FAILURE);
   }
 
-  // Permitir reutilizar el puerto
   int opt = 1;
   if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
     perror("setsockopt failed");
@@ -537,7 +576,8 @@ int main(void) {
     exit(EXIT_FAILURE);
   }
 
-  cout << "UDP Server listening on port " << PORT << "..." << endl;
+  cout << "UDP Server listening on port " << PORT << " (GBN Enabled)..."
+       << endl;
 
   while (true) {
     socklen_t len = sizeof(cliaddr);
@@ -547,8 +587,6 @@ int main(void) {
     if (n > 0) {
       buffer[n] = '\0';
       string message(buffer, n);
-
-      // Manejar el mensaje en el hilo principal
       handleClientMessage(sockfd, message, cliaddr);
     }
   }
