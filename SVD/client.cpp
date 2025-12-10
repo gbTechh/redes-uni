@@ -283,12 +283,6 @@ void generarMatrizOmega() {
       Omega[i][j] = distribucion(generador);
       contador++;
     }
-
-    // // Mostrar progreso cada 10% de las filas
-    // if (n_matrix > 10 && i % (n_matrix / 10) == 0) {
-    //   float porcentaje = (float)i / n_matrix * 100.0f;
-    //   cout << "  Progreso: " << (int)porcentaje << "%" << endl;
-    // }
   }
 
   // Calcular memoria usada
@@ -437,7 +431,7 @@ void readThreadFn(int socketConn) {
           cout << "  Esperando A_part para calcular B..." << endl;
         }
 
-        remove(filename.c_str());
+        // remove(filename.c_str());
       }
       break;
     }

@@ -32,7 +32,7 @@ map<string, int> m_clients;
 mutex clientsMutex;
 map<int, string> socket_to_id;
 int next_id = 1;
-const int MAX_WORKERS = 4;
+const int MAX_WORKERS = 3;
 
 atomic<bool> computation_started(false);
 int target_rank = 1000;
@@ -187,56 +187,104 @@ void enviarArchivoAWorker(int sock, const string &filename, int worker_num) {
 }
 
 vector<vector<double>> gramSchmidt(const vector<vector<double>> &Y) {
-  int m = Y.size();
-  int l = Y[0].size();
+  cout << "\n=== CALCULANDO GRAM-SCHMIDT ===" << endl;
 
-  vector<vector<double>> Q(l);
+  int m = Y.size();    // filas
+  int l = Y[0].size(); // columnas
+
+  cout << "  Input Y: " << m << " × " << l << endl;
+
+  vector<vector<double>> Q_cols(l);
   for (int j = 0; j < l; j++) {
-    Q[j].resize(m);
+    Q_cols[j].resize(m);
     for (int i = 0; i < m; i++) {
-      Q[j][i] = Y[i][j];
+      Q_cols[j][i] = Y[i][j];
     }
   }
-
-  vector<vector<double>> R(l, vector<double>(l, 0.0));
 
   for (int j = 0; j < l; j++) {
     for (int i = 0; i < j; i++) {
       double dot = 0.0;
       for (int k = 0; k < m; k++) {
-        dot += Q[i][k] * Q[j][k];
+        dot += Q_cols[i][k] * Q_cols[j][k];
       }
-      R[i][j] = dot;
 
       for (int k = 0; k < m; k++) {
-        Q[j][k] -= dot * Q[i][k];
+        Q_cols[j][k] -= dot * Q_cols[i][k];
       }
     }
 
     double norm = 0.0;
     for (int k = 0; k < m; k++) {
-      norm += Q[j][k] * Q[j][k];
+      norm += Q_cols[j][k] * Q_cols[j][k];
     }
     norm = sqrt(norm);
-    R[j][j] = norm;
 
-    if (norm > 1e-12) {
+    if (norm > 1e-10) {
       for (int k = 0; k < m; k++) {
-        Q[j][k] /= norm;
+        Q_cols[j][k] /= norm;
       }
     } else {
+      cout << "  ADVERTENCIA: Columna " << j
+           << " es linealmente dependiente (norma=" << norm << ")" << endl;
+
       for (int k = 0; k < m; k++) {
-        Q[j][k] = (k == j && k < m) ? 1.0 : 0.0;
+        Q_cols[j][k] = (k == j % m) ? 1.0 : 0.0;
       }
+
+      for (int i = 0; i < j; i++) {
+        double dot = 0.0;
+        for (int k = 0; k < m; k++) {
+          dot += Q_cols[i][k] * Q_cols[j][k];
+        }
+        for (int k = 0; k < m; k++) {
+          Q_cols[j][k] -= dot * Q_cols[i][k];
+        }
+      }
+
+      norm = 0.0;
+      for (int k = 0; k < m; k++) {
+        norm += Q_cols[j][k] * Q_cols[j][k];
+      }
+      norm = sqrt(norm);
+
+      if (norm > 1e-10) {
+        for (int k = 0; k < m; k++) {
+          Q_cols[j][k] /= norm;
+        }
+      }
+    }
+
+    if (l > 10 && j % max(1, l / 10) == 0) {
+      float progreso = (float)(j + 1) / l * 100.0f;
+      cout << "  Progreso: " << (int)progreso << "%" << endl;
     }
   }
 
   vector<vector<double>> Q_filas(m, vector<double>(l));
   for (int i = 0; i < m; i++) {
     for (int j = 0; j < l; j++) {
-      Q_filas[i][j] = Q[j][i];
+      Q_filas[i][j] = Q_cols[j][i];
     }
   }
+
+  cout << "  ✓ Q calculada: " << Q_filas.size() << " × " << Q_filas[0].size()
+       << endl;
+
+  cout << "  Verificando ortogonalidad..." << endl;
+  double max_error = 0.0;
+  for (int i = 0; i < l; i++) {
+    for (int j = i; j < l; j++) {
+      double dot = 0.0;
+      for (int k = 0; k < m; k++) {
+        dot += Q_cols[i][k] * Q_cols[j][k];
+      }
+      double expected = (i == j) ? 1.0 : 0.0;
+      double error = abs(dot - expected);
+      max_error = max(max_error, error);
+    }
+  }
+  cout << "  Error máximo de ortogonalidad: " << max_error << endl;
 
   return Q_filas;
 }
@@ -298,7 +346,7 @@ void enviarQtAWorker(int sock, const string &filename, int worker_num) {
 
   write(sock, proto.c_str(), proto.size());
 
-  cout << "  ✓ Q^T enviada: " << filename << " -> " << worker_id << " ("
+  cout << "  Q^T enviada: " << filename << " -> " << worker_id << " ("
        << fileData.size() << " bytes)" << endl;
 
   remove(filename.c_str());
@@ -307,14 +355,11 @@ void enviarQtAWorker(int sock, const string &filename, int worker_num) {
 void distribuirQtYCalcularB() {
   cout << "\n=== DISTRIBUYENDO Q^T A WORKERS ===" << endl;
 
-  // Qt ya está calculada (k × m)
   int k = Qt.size();
   int m = Qt[0].size();
 
   cout << "  Q^T: " << k << " × " << m << endl;
 
-  // Dividir Qt por COLUMNAS (cada worker recibe las columnas correspondientes
-  // a su parte de A)
   int total_workers = MAX_WORKERS;
   int cols_por_worker = m / total_workers;
 
@@ -331,14 +376,11 @@ void distribuirQtYCalcularB() {
 
     int sock = it->second;
 
-    // Determinar rango de columnas para este worker
     int col_inicio = worker_num * cols_por_worker;
     int col_fin = (worker_num == total_workers - 1)
                       ? m
                       : (worker_num + 1) * cols_por_worker;
 
-    // Extraer Qt_part: TODAS las filas, pero solo columnas [col_inicio,
-    // col_fin)
     vector<vector<double>> Qt_part;
     for (int i = 0; i < k; i++) {
       vector<double> fila_parte;
@@ -351,14 +393,12 @@ void distribuirQtYCalcularB() {
     cout << "  Worker " << worker_num << ": Qt_part = " << Qt_part.size()
          << " × " << Qt_part[0].size() << endl;
 
-    // Crear archivo temporal
     string nombre_archivo = crearArchivoQtParte(worker_num, Qt_part);
     if (nombre_archivo.empty()) {
       cerr << "  Error creando archivo Qt para worker " << worker_num << endl;
       continue;
     }
 
-    // Enviar archivo
     enviarQtAWorker(sock, nombre_archivo, worker_num);
   }
 
