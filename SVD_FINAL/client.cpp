@@ -69,10 +69,9 @@ void guardarArchivo(const string &filename, const string &data) {
   ofstream archivo(filename, ios::binary);
   if (archivo) {
     archivo.write(data.c_str(), data.size());
-    archivo.flush(); // Asegurar que se escriba al disco
+    archivo.flush();
     archivo.close();
 
-    // Verificar que el archivo se escribió correctamente
     ifstream verificar(filename, ios::binary | ios::ate);
     if (verificar) {
       streamsize size = verificar.tellg();
@@ -97,12 +96,9 @@ void multiplicarRangoMatrices(int fila_inicio, int fila_fin,
   int cols_A = A[0].size();
   int cols_B = B[0].size();
 
-  // Iterar sobre el rango de filas asignado de la matriz A (y C)
   for (int i = fila_inicio; i < fila_fin; i++) {
-    // Iterar sobre las columnas de la matriz B (y C)
     for (int j = 0; j < cols_B; j++) {
       double suma = 0.0;
-      // Multiplicación interna (k)
       for (int k = 0; k < cols_A; k++) {
         suma += A[i][k] * B[k][j];
       }
