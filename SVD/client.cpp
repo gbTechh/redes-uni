@@ -32,45 +32,22 @@ bool omega_generated = false;
 
 vector<vector<double>> A_part;  // Parte de matriz A para este worker
 vector<vector<double>> Y_local; // Resultado Y_local = A_part × Ω
-bool A_part_recibida = false;   // Bandera: ¿ya recibimos A?
-bool Y_local_calculada = false; // Bandera: ¿ya calculamos Y?
+vector<vector<double>> Qt_part; // Nueva: parte de Q^T
+vector<vector<double>> B_local;
+
+bool A_part_recibida = false;
+bool Y_local_calculada = false;
+bool Qt_part_recibida = false;
+bool B_local_calculada = false;
 int worker_num_asignado = -1;
 
-string leerArchivo(string filename) {
-  ifstream archivo(filename, ios::binary | ios::ate);
-  if (!archivo) {
-    cout << "Error: No se pudo abrir el archivo '" << filename << "'" << endl;
-    return "";
-  }
-
-  streamsize size = archivo.tellg();
-  archivo.seekg(0, ios::beg);
-
-  string content(size, '\0');
-  if (archivo.read(&content[0], size)) {
-    return content;
-  }
-
-  return "";
-}
-
 void guardarArchivo(const string &filename, const string &data) {
-  string nombreDestino;
-  size_t puntoPos = filename.find_last_of('.');
-
-  if (puntoPos != string::npos) {
-    nombreDestino =
-        filename.substr(0, puntoPos) + "-destino" + filename.substr(puntoPos);
-  } else {
-    nombreDestino = filename + "-destino";
-  }
-
-  ofstream archivo(nombreDestino, ios::binary);
+  ofstream archivo(filename, ios::binary);
   if (archivo) {
     archivo.write(data.c_str(), data.size());
     archivo.close();
   } else {
-    cout << "Error al guardar el archivo: " << nombreDestino << endl;
+    cout << "Error al guardar el archivo: " << filename << endl;
   }
 }
 
@@ -81,8 +58,42 @@ string padNumber(long long num, int width) {
   return s;
 }
 
+void enviarYLocal(int socketConn) {
+  if (!Y_local_calculada || Y_local.empty()) {
+    cerr << "ERROR: Y_local no está lista para enviar" << endl;
+    return;
+  }
+
+  cout << "\n=== ENVIANDO Y_local AL SERVIDOR ===" << endl;
+
+  stringstream ss;
+  for (const auto &fila : Y_local) {
+    for (size_t j = 0; j < fila.size(); j++) {
+      ss << fila[j];
+      if (j < fila.size() - 1)
+        ss << ",";
+    }
+    ss << "\n";
+  }
+  string y_data = ss.str();
+
+  cout << "  Dimensiones: " << Y_local.size() << " × " << Y_local[0].size()
+       << endl;
+  cout << "  Tamaño datos: " << y_data.size() << " bytes ("
+       << (y_data.size() / (1024.0 * 1024.0)) << " MB)" << endl;
+
+  string proto =
+      "y" + padNumber(my_id.size(), 3) + my_id + padNumber(Y_local.size(), 8) +
+      padNumber(Y_local[0].size(), 8) + padNumber(y_data.size(), 10) + y_data;
+
+  cout << "  Enviando..." << endl;
+
+  write(socketConn, proto.c_str(), proto.size());
+
+  cout << "  ✓ Y_local enviada exitosamente" << endl;
+}
 void calcularYLocal() {
-  cout << "\n=== CALCULANDO Y_local = A × Ω ===" << endl;
+  cout << "\n=== CALCULANDO Y_local = A × Omega ===" << endl;
 
   if (!omega_generated) {
     cerr << "ERROR: Ω no generada aún" << endl;
@@ -98,8 +109,8 @@ void calcularYLocal() {
   int filas_Omega = Omega.size();   // Debería ser = cols_A
   int cols_Omega = Omega[0].size(); // columnas de Ω
 
-  cout << "A: " << filas_A << " × " << cols_A << endl;
-  cout << "Ω: " << filas_Omega << " × " << cols_Omega << endl;
+  cout << "  A_part: " << filas_A << " × " << cols_A << endl;
+  cout << "  Omega:  " << filas_Omega << " × " << cols_Omega << endl;
 
   if (cols_A != filas_Omega) {
     cerr << "ERROR: No se puede multiplicar: A.cols=" << cols_A
@@ -119,11 +130,6 @@ void calcularYLocal() {
       }
       Y_local[i][j] = suma;
     }
-
-    if (filas_A > 10 && i % (filas_A / 10) == 0) {
-      float porcentaje = (float)i / filas_A * 100.0f;
-      cout << "  Progreso: " << (int)porcentaje << "%" << endl;
-    }
   }
 
   cout << "Y_local calculada: " << Y_local.size() << " × " << Y_local[0].size()
@@ -132,8 +138,95 @@ void calcularYLocal() {
   cout << "Y_local[0][1] = " << Y_local[0][1] << endl;
 
   Y_local_calculada = true;
+}
 
-  cout << "Listo para enviar Y_local al servidor" << endl;
+void enviarBLocal(int socketConn) {
+  if (!B_local_calculada || B_local.empty()) {
+    cerr << "ERROR: B_local no está lista para enviar" << endl;
+    return;
+  }
+
+  cout << "\n=== ENVIANDO B_local AL SERVIDOR ===" << endl;
+
+  stringstream ss;
+  for (const auto &fila : B_local) {
+    for (size_t j = 0; j < fila.size(); j++) {
+      ss << fila[j];
+      if (j < fila.size() - 1)
+        ss << ",";
+    }
+    ss << "\n";
+  }
+  string b_data = ss.str();
+
+  cout << "  Dimensiones: " << B_local.size() << " × " << B_local[0].size()
+       << endl;
+  cout << "  Tamaño: " << (b_data.size() / (1024.0 * 1024.0)) << " MB" << endl;
+
+  string proto =
+      "b" + padNumber(my_id.size(), 3) + my_id + padNumber(B_local.size(), 8) +
+      padNumber(B_local[0].size(), 8) + padNumber(b_data.size(), 10) + b_data;
+
+  write(socketConn, proto.c_str(), proto.size());
+
+  cout << "  ✓ B_local enviada" << endl;
+}
+
+void calcularBLocal(int socketConn) {
+  cout << "\n=== CALCULANDO B_local = Q^T × A_part ===" << endl;
+
+  if (Qt_part.empty()) {
+    cerr << "ERROR: Qt_part no recibida" << endl;
+    return;
+  }
+  if (A_part.empty()) {
+    cerr << "ERROR: A_part vacía" << endl;
+    return;
+  }
+
+  int filas_Qt = Qt_part.size();   // k
+  int cols_Qt = Qt_part[0].size(); // m/4 (parte de columnas)
+  int filas_A = A_part.size();     // m/4 (mismas que cols_Qt)
+  int cols_A = A_part[0].size();   // n
+
+  cout << "  Qt_part: " << filas_Qt << " × " << cols_Qt << endl;
+  cout << "  A_part:  " << filas_A << " × " << cols_A << endl;
+
+  if (cols_Qt != filas_A) {
+    cerr << "ERROR: No se puede multiplicar: Qt.cols=" << cols_Qt
+         << " pero A.rows=" << filas_A << endl;
+    return;
+  }
+
+  B_local.resize(filas_Qt, vector<double>(cols_A, 0.0));
+
+  cout << "  Multiplicando matrices..." << endl;
+
+  // B = Qt × A
+  for (int i = 0; i < filas_Qt; i++) {
+    for (int j = 0; j < cols_A; j++) {
+      double suma = 0.0;
+      for (int k = 0; k < cols_Qt; k++) {
+        suma += Qt_part[i][k] * A_part[k][j];
+      }
+      B_local[i][j] = suma;
+    }
+
+    // Progreso
+    if (filas_Qt > 10 && i % max(1, filas_Qt / 10) == 0) {
+      float progreso = (float)(i + 1) / filas_Qt * 100.0f;
+      cout << "    Progreso: " << (int)progreso << "%" << endl;
+    }
+  }
+
+  cout << "  ✓ B_local calculada: " << B_local.size() << " × "
+       << B_local[0].size() << endl;
+  cout << "    B[0][0] = " << B_local[0][0] << endl;
+  cout << "    B[0][1] = " << B_local[0][1] << endl;
+
+  B_local_calculada = true;
+
+  enviarBLocal(socketConn);
 }
 
 vector<vector<double>> parseMatrixFromFile(const string &filename) {
@@ -161,23 +254,12 @@ vector<vector<double>> parseMatrixFromFile(const string &filename) {
 
     matriz.push_back(fila);
     fila_cont++;
-
-    // Mostrar progreso cada 1000 filas
-    if (fila_cont % 1000 == 0) {
-      cout << "  Filas leídas: " << fila_cont << endl;
-    }
   }
 
   file.close();
 
   cout << "Matriz parseada: " << matriz.size() << " x "
        << (matriz.empty() ? 0 : matriz[0].size()) << endl;
-
-  // Mostrar algunos valores para debug
-  if (!matriz.empty()) {
-    cout << "  A[0][0] = " << matriz[0][0] << endl;
-    cout << "  A[0][1] = " << matriz[0][1] << endl;
-  }
 
   return matriz;
 }
@@ -202,11 +284,11 @@ void generarMatrizOmega() {
       contador++;
     }
 
-    // Mostrar progreso cada 10% de las filas
-    if (n_matrix > 10 && i % (n_matrix / 10) == 0) {
-      float porcentaje = (float)i / n_matrix * 100.0f;
-      cout << "  Progreso: " << (int)porcentaje << "%" << endl;
-    }
+    // // Mostrar progreso cada 10% de las filas
+    // if (n_matrix > 10 && i % (n_matrix / 10) == 0) {
+    //   float porcentaje = (float)i / n_matrix * 100.0f;
+    //   cout << "  Progreso: " << (int)porcentaje << "%" << endl;
+    // }
   }
 
   // Calcular memoria usada
@@ -214,11 +296,11 @@ void generarMatrizOmega() {
   long long memoria_bytes = elementos * sizeof(double);
   double memoria_mb = memoria_bytes / (1024.0 * 1024.0);
 
-  cout << "Ω generada exitosamente!" << endl;
+  cout << "Matriz omega generada exitosamente!" << endl;
   cout << "  Elementos: " << elementos << endl;
   cout << "  Memoria usada: " << memoria_mb << " MB" << endl;
-  cout << "  Primer valor Ω[0][0] = " << Omega[0][0] << endl;
-  cout << "  Último valor Ω[" << n_matrix - 1 << "][" << k_matrix - 1
+  cout << "  Primer valor [0][0] = " << Omega[0][0] << endl;
+  cout << "  Último valor [" << n_matrix - 1 << "][" << k_matrix - 1
        << "] = " << Omega[n_matrix - 1][k_matrix - 1] << endl;
 
   omega_generated = true;
@@ -316,7 +398,7 @@ void readThreadFn(int socketConn) {
       if (filename.find("A_part_") == 0) {
         cout << "\n=== MATRIZ A RECIBIDA ===" << endl;
 
-        string archivo_guardado = filename + "-destino";
+        string archivo_guardado = filename;
 
         A_part = parseMatrixFromFile(archivo_guardado);
         A_part_recibida = true;
@@ -333,11 +415,29 @@ void readThreadFn(int socketConn) {
         }
 
         if (omega_generated) {
-          cout << "Ω lista, calculando Y_local..." << endl;
+          cout << "Matriz omega lista, calculando Y_local..." << endl;
           calcularYLocal();
+
+          cout << "\n=== Enviar Matriz Y ===" << endl;
+          enviarYLocal(socketConn);
+
         } else {
           cout << "Esperando que Ω se genere..." << endl;
         }
+      } else if (filename.find("Qt_part_") == 0) {
+        cout << "\n=== RECIBIDA MATRIZ Q^T ===" << endl;
+
+        Qt_part = parseMatrixFromFile(filename);
+        Qt_part_recibida = true;
+
+        // Calcular B ahora que tenemos Qt y A
+        if (A_part_recibida) {
+          calcularBLocal(socketConn);
+        } else {
+          cout << "  Esperando A_part para calcular B..." << endl;
+        }
+
+        remove(filename.c_str());
       }
       break;
     }
@@ -369,14 +469,12 @@ void readThreadFn(int socketConn) {
       }
       seed_value = stoul(seed_str);
 
-      cout << "Parámetros recibidos:" << endl;
-      cout << "  n (columnas de A) = " << n_matrix << endl;
-      cout << "  k (columnas de Ω) = " << k_matrix << endl;
-      cout << "  seed = " << seed_value << endl;
+      cout << "PROTOCOLO: " << type << "|" << n_matrix << "|" << k_matrix << "|"
+           << seed_value << endl;
 
-      cout << "\nGenerando matriz Ω en RAM..." << endl;
+      cout << "\nGenerando matriz Omega" << endl;
       generarMatrizOmega();
-      cout << "=== Ω LISTA PARA USO ===" << endl;
+      cout << "=== Matriz Omega Lista ===" << endl;
 
       string confirmacion = "o" + padNumber(my_id.size(), 3) + my_id;
       write(socketConn, confirmacion.c_str(), confirmacion.size());
